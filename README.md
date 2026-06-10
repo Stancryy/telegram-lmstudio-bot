@@ -19,6 +19,10 @@ Este é um bot para o Telegram que utiliza o seu servidor local do **LM Studio**
 1. Na pasta do projeto, crie um arquivo chamado `.env` baseado no arquivo `.env.example`:
    - Copie o arquivo `.env.example` e renomeie a cópia para `.env`
 2. Abra o arquivo `.env` e cole o token do seu bot na variável `TELEGRAM_BOT_TOKEN`.
+3. (Opcional) Configure as variáveis adicionais:
+   - `MODEL_NAME` — Nome do modelo carregado no LM Studio (padrão: `local-model`)
+   - `TEMPERATURE` — Criatividade das respostas de 0.0 a 1.0 (padrão: `0.7`)
+   - `SYSTEM_PROMPT` — Instrução de comportamento para o modelo
 
 ### 3. Inicie o LM Studio Local Server
 1. Abra o LM Studio.
@@ -47,6 +51,7 @@ Abra o Telegram, procure pelo username do seu bot e envie `/start`.
 
 ## Comandos Disponíveis
 - `/start` - Inicia a conversa com o bot.
+- `/help` - Mostra a lista de comandos disponíveis.
 - `/new` - Cria um novo chat limpo.
 - `/chats` - Lista todos os chats salvos com uma prévia da mensagem.
 - `/switch <id>` - Alterna para um chat específico da lista.

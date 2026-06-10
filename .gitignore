@@ -2,3 +2,5 @@
 __pycache__/
 histories.json
 *.pyc
+venv/
+.venv/
