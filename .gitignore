@@ -4,3 +4,11 @@ histories.json
 *.pyc
 venv/
 .venv/
+*.log
+*.bak
+*.tmp
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
