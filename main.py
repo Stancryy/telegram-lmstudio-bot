@@ -2,9 +2,11 @@ import os
 import json
 import asyncio
 import base64
+import re
 import time
 import logging
 import html as html_lib
+from typing import AsyncGenerator, Union
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from telegram import Update
@@ -26,7 +28,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "local-model")
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
+
+try:
+    TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
+    if not 0.0 <= TEMPERATURE <= 2.0:
+        raise ValueError("TEMPERATURE fora do intervalo válido (0.0 - 2.0)")
+except (ValueError, TypeError):
+    logger.warning("TEMPERATURE inválido no .env, usando valor padrão 0.7")
+    TEMPERATURE = 0.7
 
 # Carrega e converte a lista de usuários permitidos (set para O(1) lookup)
 ALLOWED_USER_IDS_ENV = os.getenv("ALLOWED_USER_IDS", "")
@@ -41,14 +50,19 @@ client = AsyncOpenAI(
 )
 
 # Estrutura: { user_id: { "current": "1", "sessions": { "1": [{"role": "system", "content": "..."}, ...] } } }
-user_histories = {}
-MAX_HISTORY_LENGTH = 800
+user_histories: dict = {}
+MAX_HISTORY_LENGTH = int(os.getenv("MAX_HISTORY_LENGTH", "800"))
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "histories.json")
+
+# Constantes do Telegram e de streaming
+MAX_TELEGRAM_MSG_LENGTH = 4096
+STREAM_EDIT_INTERVAL = 1.5  # segundos entre edições durante streaming
+CHAT_PREVIEW_LENGTH = 35
 
 # Lock para evitar race conditions na persistência
 history_lock = asyncio.Lock()
 
-async def load_history():
+async def load_history() -> None:
     """Carrega o histórico salvo no disco e converte se for da versão antiga."""
     global user_histories
     if os.path.exists(HISTORY_FILE):
@@ -65,33 +79,37 @@ async def load_history():
                 else:
                     user_histories[user_id] = v
         except Exception as e:
-            logger.error(f"Erro ao carregar histórico: {e}")
+            logger.error("Erro ao carregar histórico: %s", e)
 
-def _read_history_file():
+def _read_history_file() -> dict:
     """Leitura síncrona do arquivo de histórico (executada em thread)."""
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def _write_history_file(data_str: str):
-    """Escrita síncrona do arquivo de histórico (executada em thread)."""
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+def _write_history_file(data_str: str) -> None:
+    """Escrita atômica do arquivo de histórico (write-tmp-then-rename)."""
+    tmp_file = HISTORY_FILE + ".tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         f.write(data_str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, HISTORY_FILE)
 
-async def save_history():
-    """Salva o histórico atual no disco de forma segura (com lock e I/O em thread)."""
+async def save_history() -> None:
+    """Salva o histórico atual no disco de forma segura (com lock, escrita atômica e I/O em thread)."""
     async with history_lock:
         try:
             data_str = json.dumps(user_histories, ensure_ascii=False, indent=2)
             await asyncio.to_thread(_write_history_file, data_str)
         except Exception as e:
-            logger.error(f"Erro ao salvar histórico: {e}")
+            logger.error("Erro ao salvar histórico: %s", e)
 
 def is_user_allowed(user_id: int) -> bool:
     if not ALLOWED_USER_IDS:
         return True
     return user_id in ALLOWED_USER_IDS
 
-def init_user_session(user_id: int):
+def init_user_session(user_id: int) -> None:
     """Garante que a estrutura de dados do usuário exista."""
     if user_id not in user_histories:
         user_histories[user_id] = {
@@ -115,7 +133,7 @@ def _sanitize_message_for_history(user_message, caption: str = "") -> str:
         return "[Imagem recebida]"
     return user_message
 
-async def get_llm_stream(user_id: int, user_message):
+async def get_llm_stream(user_id: int, user_message: Union[str, list]) -> AsyncGenerator[str, None]:
     init_user_session(user_id)
     curr = user_histories[user_id]["current"]
     session_history = user_histories[user_id]["sessions"][curr]
@@ -150,7 +168,7 @@ async def get_llm_stream(user_id: int, user_message):
                 yield bot_response
                 
     except Exception as e:
-        logger.error(f"Erro ao contatar LM Studio: {e}")
+        logger.error("Erro ao contatar LM Studio: %s", e)
         yield f"Desculpe, ocorreu um erro ao processar sua mensagem: {e}"
     finally:
         # Salvar a mensagem do usuário limpa (sem base64) e a resposta (mesmo parcial)
@@ -163,10 +181,14 @@ async def get_llm_stream(user_id: int, user_message):
             # Se não houve resposta alguma, remover a mensagem do usuário para manter consistência
             session_history.pop()
         
-        # Truncar histórico com while para garantir o limite
+        # Truncar histórico removendo pares user/assistant mais antigos (preserva system prompt)
         while len(session_history) > MAX_HISTORY_LENGTH + 1:
-            session_history.pop(1)
-            session_history.pop(1)
+            if len(session_history) > 2:
+                session_history.pop(1)  # remove mensagem mais antiga (user)
+                if len(session_history) > 1 and session_history[1]["role"] == "assistant":
+                    session_history.pop(1)  # remove resposta correspondente
+            else:
+                break
             
         await save_history()
 
@@ -175,11 +197,8 @@ def _format_to_html(text: str) -> str:
     # Primeiro escapa caracteres HTML especiais
     text = html_lib.escape(text)
     
-    # Blocos de código (``` ... ```) — processar antes do inline
-    import re
-    
     # Code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
-    def replace_code_block(match):
+    def replace_code_block(match: re.Match) -> str:
         code = match.group(2)
         return f"<pre><code>{code}</code></pre>"
     text = re.sub(r'```(\w*)\n(.*?)```', replace_code_block, text, flags=re.DOTALL)
@@ -215,10 +234,10 @@ HELP_TEXT = (
     "/delete &lt;id&gt; - Exclui um chat permanentemente"
 )
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_user_allowed(user.id):
-        logger.warning(f"Acesso negado para o ID {user.id} ({user.first_name}) no /start")
+        logger.warning("Acesso negado para o ID %s (%s) no /start", user.id, user.first_name)
         await update.message.reply_text(f"Acesso negado. Seu ID do Telegram é: {user.id}")
         return
         
@@ -229,12 +248,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_user_allowed(user.id): return
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
 
-async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_user_allowed(user_id): return
     init_user_session(user_id)
@@ -248,7 +267,7 @@ async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✨ Novo chat iniciado! Você está agora na Sessão {next_id}.")
 
-async def list_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def list_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_user_allowed(user_id): return
     init_user_session(user_id)
@@ -262,7 +281,7 @@ async def list_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for m in msgs:
             if m["role"] == "user":
                 content = m["content"] if isinstance(m["content"], str) else "[Imagem]"
-                preview = content[:35] + "..." if len(content) > 35 else content
+                preview = content[:CHAT_PREVIEW_LENGTH] + "..." if len(content) > CHAT_PREVIEW_LENGTH else content
                 break
                 
         prefix = "👉" if sid == curr else "💬"
@@ -271,7 +290,7 @@ async def list_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_lines.append("\nUse /switch ID para trocar de chat.")
     await update.message.reply_text("\n".join(msg_lines), parse_mode=ParseMode.HTML)
 
-async def switch_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def switch_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_user_allowed(user_id): return
     init_user_session(user_id)
@@ -288,7 +307,7 @@ async def switch_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Chat não encontrado. Use /chats para ver os IDs disponíveis.")
 
-async def delete_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_user_allowed(user_id): return
     init_user_session(user_id)
@@ -305,7 +324,7 @@ async def delete_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Chat não encontrado.")
 
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_user_allowed(user_id): return
     init_user_session(user_id)
@@ -315,10 +334,10 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_history()
     await update.message.reply_text(f"🧹 Memória da Sessão {curr} limpa. Pode começar um novo assunto!")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_user_allowed(user.id):
-        logger.warning(f"Tentativa de acesso negado: {user.id}")
+        logger.warning("Tentativa de acesso negado: %s", user.id)
         await update.message.reply_text(f"Acesso negado. Seu ID é {user.id}.")
         return
 
@@ -349,19 +368,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_text = partial_text
             current_time = time.time()
             
-            if current_time - last_edit_time > 1.5:
-                text_to_show = partial_text[:4000] + " ✍️" if len(partial_text) > 4000 else partial_text + " ✍️"
+            if current_time - last_edit_time > STREAM_EDIT_INTERVAL:
+                truncated = partial_text[:MAX_TELEGRAM_MSG_LENGTH - 10]
+                formatted_partial = _format_to_html(truncated)
                 try:
-                    await loading_message.edit_text(text_to_show)
+                    await loading_message.edit_text(formatted_partial + " ✍️", parse_mode=ParseMode.HTML)
                 except BadRequest:
-                    pass
+                    # Fallback sem formatação se HTML parcial for inválido
+                    try:
+                        await loading_message.edit_text(truncated + " ✍️")
+                    except BadRequest:
+                        pass
                 last_edit_time = current_time
 
         if not final_text:
             await loading_message.edit_text("A IA não retornou nenhuma resposta.")
             return
         
-        MAX_LENGTH = 4000
+        MAX_LENGTH = MAX_TELEGRAM_MSG_LENGTH
         formatted_text = _format_to_html(final_text)
         
         if len(formatted_text) <= MAX_LENGTH:
@@ -388,22 +412,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(final_text[i:i+MAX_LENGTH])
 
     except Exception as e:
-        logger.error(f"Erro durante o handle_message: {e}")
+        logger.error("Erro durante o handle_message: %s", e)
         await update.message.reply_text("Desculpe, ocorreu um erro inesperado.")
 
-async def check_lm_studio():
+async def check_lm_studio() -> bool:
     """Health check para verificar se o LM Studio está acessível."""
     try:
         models = await client.models.list()
         model_names = [m.id for m in models.data]
-        logger.info(f"✅ LM Studio conectado. Modelos disponíveis: {model_names}")
+        logger.info("✅ LM Studio conectado. Modelos disponíveis: %s", model_names)
         return True
     except Exception as e:
-        logger.warning(f"⚠️ LM Studio não acessível em {LM_STUDIO_URL}: {e}")
+        logger.warning("⚠️ LM Studio não acessível em %s: %s", LM_STUDIO_URL, e)
         logger.warning("O bot será iniciado mesmo assim. Certifique-se de iniciar o LM Studio antes de enviar mensagens.")
         return False
 
-async def post_init(application):
+async def post_init(application) -> None:
     """Executado após a inicialização do bot."""
     await load_history()
     await check_lm_studio()
