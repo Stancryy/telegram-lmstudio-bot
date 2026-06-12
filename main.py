@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from telegram import Update
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
 
 # Configura logs para facilitar o debug
 logging.basicConfig(
@@ -802,7 +803,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     except Exception as e:
         logger.error("Erro durante o handle_message: %s", e)
-        await update.message.reply_text("Desculpe, ocorreu um erro inesperado.")
+        try:
+            await update.message.reply_text("Desculpe, ocorreu um erro inesperado.")
+        except TimedOut:
+            logger.warning("Timeout ao enviar mensagem de erro para o usuário %s", user.id)
+        except Exception as send_err:
+            logger.error("Falha ao enviar mensagem de erro: %s", send_err)
 
 
 # ==== INICIALIZAÇÃO ====
@@ -840,9 +846,17 @@ if __name__ == '__main__':
         logger.error("Token do Telegram não encontrado! Configure o arquivo .env.")
         exit(1)
 
+    # Timeouts maiores para evitar TimedOut em respostas longas do LM Studio
+    request = HTTPXRequest(
+        read_timeout=30.0,
+        write_timeout=30.0,
+        connect_timeout=15.0,
+    )
+
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
         .post_init(post_init)
         .post_shutdown(on_shutdown)
         .build()
