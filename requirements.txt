@@ -1,3 +1,4 @@
 python-telegram-bot>=21.0,<22.0  # API do Telegram
 openai>=1.0,<2.0                 # Cliente OpenAI-compatible (LM Studio)
 python-dotenv>=1.0,<2.0          # Carregar .env
+mempalace                        # Memória semântica de longo prazo (local)
