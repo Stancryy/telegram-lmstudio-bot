@@ -15,6 +15,9 @@ from telegram.error import BadRequest, TimedOut
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
+# Módulo de memória semântica (MemPalace)
+import memory as mem
+
 # Configura logs para facilitar o debug
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,6 +32,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "local-model")
+
+# Configurações do MemPalace
+MEMPALACE_ENABLED = os.getenv("MEMPALACE_ENABLED", "true").lower() in ("true", "1", "yes")
+MEMPALACE_RESULTS = int(os.getenv("MEMPALACE_RESULTS", "3"))
+MEMPALACE_WING = os.getenv("MEMPALACE_WING", "telegram_bot")
 
 try:
     TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
@@ -230,11 +238,34 @@ async def get_llm_stream(user_id: int, user_message: Union[str, list]) -> AsyncG
     else:
         await save_history()
 
+    # === MemPalace: buscar memórias relevantes e injetar no contexto ===
+    messages_to_send = list(session_history)  # cópia para não alterar o histórico
+    if MEMPALACE_ENABLED and mem.is_available():
+        query_text = sanitized if isinstance(user_message, list) else user_message
+        try:
+            memories = await mem.search_memories(
+                query=query_text,
+                wing=MEMPALACE_WING,
+                n_results=MEMPALACE_RESULTS,
+            )
+            if memories:
+                context_text = mem.format_memories_for_context(memories)
+                if context_text:
+                    # Inserir após o system prompt (posição 1)
+                    memory_msg = {"role": "system", "content": context_text}
+                    messages_to_send.insert(1, memory_msg)
+                    logger.info(
+                        "🏛️ MemPalace: %d memória(s) injetada(s) no contexto para user %s",
+                        len(memories), user_id
+                    )
+        except Exception as e:
+            logger.warning("MemPalace: falha na busca de memórias: %s", e)
+
     bot_response = ""
     try:
         response_stream = await client.chat.completions.create(
             model=MODEL_NAME,
-            messages=session_history,
+            messages=messages_to_send,
             temperature=TEMPERATURE,
             stream=True
         )
@@ -268,6 +299,18 @@ async def get_llm_stream(user_id: int, user_message: Union[str, list]) -> AsyncG
             del session_history[1:1 + excess]
 
         await save_history_immediate()
+
+        # === MemPalace: indexar a conversa em background ===
+        if MEMPALACE_ENABLED and mem.is_available() and bot_response:
+            curr = user_histories[user_id]["current"]
+            asyncio.create_task(
+                mem.mine_conversation(
+                    user_id=user_id,
+                    session_id=curr,
+                    messages=session_history,
+                    wing=MEMPALACE_WING,
+                )
+            )
 
 
 # ==== FORMATAÇÃO ====
@@ -358,7 +401,11 @@ HELP_TEXT = (
     "/delete &lt;id&gt; - Exclui um chat permanentemente\n"
     "/retry - Reenviar a última pergunta para nova resposta\n"
     "/export - Exporta o chat atual como arquivo de texto\n"
-    "/status - Mostra diagnóstico do bot e do LM Studio"
+    "/status - Mostra diagnóstico do bot e do LM Studio\n\n"
+    "🏛️ <b>Memória de Longo Prazo (MemPalace)</b>\n"
+    "/remember &lt;query&gt; - Busca nas memórias de conversas passadas\n"
+    "/memory - Status da memória de longo prazo\n"
+    "/forget - Apaga todas as memórias armazenadas"
 )
 
 
@@ -705,6 +752,137 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
 
+# ==== COMANDOS MEMPALACE ====
+
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/remember <query> — Busca nas memórias de conversas passadas."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_user_allowed(user_id):
+        return
+
+    if not MEMPALACE_ENABLED:
+        await update.message.reply_text("🏛️ MemPalace está desabilitado. Configure MEMPALACE_ENABLED=true no .env.")
+        return
+
+    if not mem.is_available():
+        await update.message.reply_text("🏛️ MemPalace não está disponível. Verifique a instalação.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Formato: /remember sua busca aqui")
+        return
+
+    query = " ".join(context.args)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+    memories = await mem.search_memories(
+        query=query,
+        wing=MEMPALACE_WING,
+        n_results=5,
+    )
+
+    if not memories:
+        await update.message.reply_text(
+            f'🏛️ Nenhuma memória encontrada para: "{html_lib.escape(query)}"',
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = [f'🏛️ <b>Memórias encontradas para:</b> "{html_lib.escape(query)}"\n']
+    for i, m in enumerate(memories, 1):
+        sim = m.get("similarity", 0)
+        text = m.get("text", "").strip()
+        wing = html_lib.escape(m.get("wing", "?"))
+        room = html_lib.escape(m.get("room", "?"))
+
+        # Truncar textos muito longos
+        if len(text) > 200:
+            text = text[:200] + "..."
+
+        lines.append(
+            f"<b>[{i}]</b> {wing}/{room} — <i>relevância: {sim:.0%}</i>\n"
+            f"<code>{html_lib.escape(text)}</code>\n"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def memory_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/memory — Mostra status da memória de longo prazo."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_user_allowed(user_id):
+        return
+
+    if not MEMPALACE_ENABLED:
+        await update.message.reply_text(
+            "🏛️ <b>MemPalace</b>: Desabilitado\n\n"
+            "Configure <code>MEMPALACE_ENABLED=true</code> no arquivo .env para ativar.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    status = await mem.get_memory_status()
+
+    if not status.get("available"):
+        reason = status.get("reason", "Desconhecido")
+        await update.message.reply_text(
+            f"🏛️ <b>MemPalace</b>: Indisponível\nMotivo: {html_lib.escape(reason)}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    total = status.get("total_drawers", 0)
+    palace_path = html_lib.escape(status.get("palace_path", "?"))
+    wings = status.get("wings", {})
+
+    wings_text = "Nenhum"
+    if wings:
+        wings_lines = [f"  • <code>{html_lib.escape(w)}</code>: {c} drawer(s)" for w, c in wings.items()]
+        wings_text = "\n".join(wings_lines)
+
+    msg = (
+        "🏛️ <b>Status da Memória de Longo Prazo</b>\n\n"
+        f"<b>Status:</b> ✅ Ativo\n"
+        f"<b>Wing:</b> <code>{html_lib.escape(MEMPALACE_WING)}</code>\n"
+        f"<b>Total de memórias:</b> {total}\n"
+        f"<b>Palace:</b> <code>{palace_path}</code>\n\n"
+        f"<b>Wings armazenadas:</b>\n{wings_text}"
+    )
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/forget — Apaga todas as memórias armazenadas do wing atual."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_user_allowed(user_id):
+        return
+
+    if not MEMPALACE_ENABLED or not mem.is_available():
+        await update.message.reply_text("🏛️ MemPalace não está ativo.")
+        return
+
+    result = await mem.forget_memories(wing=MEMPALACE_WING)
+
+    if result.get("success"):
+        deleted = result.get("deleted_drawers", 0)
+        remaining = result.get("remaining_drawers", 0)
+        await update.message.reply_text(
+            f"🗑️ <b>{deleted}</b> memória(s) apagada(s) do wing <code>{html_lib.escape(MEMPALACE_WING)}</code>.\n"
+            f"Memórias restantes no palace: <b>{remaining}</b>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        reason = result.get("reason", "Erro desconhecido")
+        await update.message.reply_text(f"❌ Falha ao apagar memórias: {reason}")
+
+
 # ==== HANDLER DE MENSAGENS ====
 
 async def _send_final_response(update: Update, loading_message, final_text: str) -> None:
@@ -831,6 +1009,16 @@ async def post_init(application) -> None:
     await load_history()
     await check_lm_studio()
 
+    # Inicializar MemPalace se habilitado
+    if MEMPALACE_ENABLED:
+        success = await mem.init_palace()
+        if success:
+            logger.info("🏛️ MemPalace habilitado — memória de longo prazo ativa!")
+        else:
+            logger.warning("⚠️ MemPalace habilitado mas falhou na inicialização.")
+    else:
+        logger.info("MemPalace desabilitado (MEMPALACE_ENABLED=false).")
+
 
 async def on_shutdown(application) -> None:
     """Garantir que o histórico pendente seja salvo antes de encerrar."""
@@ -873,6 +1061,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('retry', retry_command))
     application.add_handler(CommandHandler('export', export_chat))
     application.add_handler(CommandHandler('status', status_command))
+    application.add_handler(CommandHandler('remember', remember_command))
+    application.add_handler(CommandHandler('memory', memory_status_command))
+    application.add_handler(CommandHandler('forget', forget_command))
 
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & (~filters.COMMAND), handle_message))
 
