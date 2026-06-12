@@ -73,6 +73,44 @@ O bot suporta o envio de imagens! Se você carregar um modelo compatível com vi
 | `/export` | Exporta o chat atual como arquivo `.txt` |
 | `/status` | Mostra diagnóstico do bot e do LM Studio |
 
+### 🏛️ Comandos de Memória de Longo Prazo (MemPalace)
+
+| Comando | Descrição |
+|---|---|
+| `/remember <query>` | Busca nas memórias de conversas passadas |
+| `/memory` | Mostra status da memória de longo prazo |
+| `/forget` | Apaga todas as memórias armazenadas |
+
+## 🏛️ Memória de Longo Prazo (MemPalace)
+
+O bot integra o **[MemPalace](https://github.com/MemPalace/mempalace)** para memória semântica de longo prazo. Isso permite que o bot **lembre de conversas anteriores** e injete contexto relevante automaticamente nas respostas.
+
+### Como Funciona
+
+1. **A cada mensagem**, o bot busca memórias relevantes no MemPalace e as injeta como contexto adicional para o modelo.
+2. **Após cada resposta**, a conversa é indexada automaticamente no MemPalace para uso futuro.
+3. **Entre sessões**, o bot mantém a memória — pergunte algo sobre uma conversa de dias atrás!
+
+### Configuração
+
+No arquivo `.env`:
+```bash
+MEMPALACE_ENABLED=true         # Ativar/desativar (padrão: true)
+MEMPALACE_RESULTS=3            # Memórias a injetar por mensagem (padrão: 3)
+MEMPALACE_WING=telegram_bot    # Nome do "wing" no palace
+```
+
+### Instalação
+
+O MemPalace é instalado automaticamente com as dependências do projeto:
+```bash
+pip install -r requirements.txt
+```
+
+> **Nota:** Na primeira execução, o MemPalace baixará um modelo de embeddings (~500MB). As buscas subsequentes são locais e rápidas.
+
+Para desabilitar o MemPalace, configure `MEMPALACE_ENABLED=false` no `.env`. O bot funcionará normalmente sem memória de longo prazo.
+
 ## 🔒 Segurança (Whitelist)
 Por padrão o bot aceita qualquer usuário. Para limitar o acesso apenas a você:
 1. Abra o arquivo `.env` e coloque uma numeração aleatória em `ALLOWED_USER_IDS` (ex: `123`).
@@ -83,4 +121,4 @@ Por padrão o bot aceita qualquer usuário. Para limitar o acesso apenas a você
 - **Erro de Conexão com o LM Studio**: O bot inicia mesmo se o LM Studio estiver desligado, mas as mensagens falharão. Certifique-se de que o servidor local está rodando em `http://localhost:1234/v1` (ou a URL definida em `LM_STUDIO_URL`).
 - **Respostas cortadas/malformadas**: Mensagens muito longas são divididas automaticamente em partes seguras, respeitando limites de palavra e formatação HTML. Se houver problemas, o bot faz fallback para texto cru.
 - **Histórico corrompido**: O bot usa escrita atômica (write-tmp-then-rename) e garante salvamento no shutdown para evitar perda de dados.
-
+- **MemPalace não inicializa**: Verifique se `mempalace` está instalado (`pip install mempalace`) e se `MEMPALACE_ENABLED=true` no `.env`. O bot funciona normalmente sem o MemPalace.
