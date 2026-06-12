@@ -58,13 +58,20 @@ O bot suporta o envio de imagens! Se você carregar um modelo compatível com vi
 3. O bot processará a imagem e responderá. (As imagens são enviadas em base64 e limpas do histórico salvo localmente para evitar arquivos gigantes).
 
 ## Comandos Disponíveis
-- `/start` - Inicia a conversa com o bot.
-- `/help` - Mostra a lista de comandos disponíveis.
-- `/new` - Cria um novo chat limpo.
-- `/chats` - Lista todos os chats salvos com uma prévia da mensagem.
-- `/switch <id>` - Alterna para um chat específico da lista.
-- `/clear` - Limpa a memória de conversação do chat atual.
-- `/delete <id>` - Exclui um chat permanentemente da memória.
+
+| Comando | Descrição |
+|---|---|
+| `/start` | Inicia a conversa com o bot |
+| `/help` | Mostra a lista de comandos disponíveis |
+| `/new` | Cria um novo chat limpo |
+| `/chats` | Lista todos os chats salvos com prévia e nome |
+| `/switch <id>` | Alterna para um chat específico da lista |
+| `/rename <id> <nome>` | Renomeia um chat (ex: `/rename 1 Projeto X`) |
+| `/clear` | Limpa a memória de conversação do chat atual |
+| `/delete <id>` | Exclui um chat permanentemente da memória |
+| `/retry` | Regenera a última resposta do assistente |
+| `/export` | Exporta o chat atual como arquivo `.txt` |
+| `/status` | Mostra diagnóstico do bot e do LM Studio |
 
 ## 🔒 Segurança (Whitelist)
 Por padrão o bot aceita qualquer usuário. Para limitar o acesso apenas a você:
@@ -74,5 +81,6 @@ Por padrão o bot aceita qualquer usuário. Para limitar o acesso apenas a você
 
 ## 🛠️ Resolução de Problemas (Troubleshooting)
 - **Erro de Conexão com o LM Studio**: O bot inicia mesmo se o LM Studio estiver desligado, mas as mensagens falharão. Certifique-se de que o servidor local está rodando em `http://localhost:1234/v1` (ou a URL definida em `LM_STUDIO_URL`).
-- **Respostas cortadas/malformadas**: Mensagens muito longas são quebradas automaticamente no limite de 4096 caracteres do Telegram. Se houver formatação HTML inválida no meio, o bot tentará fazer fallback para o texto cru automaticamente.
+- **Respostas cortadas/malformadas**: Mensagens muito longas são divididas automaticamente em partes seguras, respeitando limites de palavra e formatação HTML. Se houver problemas, o bot faz fallback para texto cru.
+- **Histórico corrompido**: O bot usa escrita atômica (write-tmp-then-rename) e garante salvamento no shutdown para evitar perda de dados.
 
