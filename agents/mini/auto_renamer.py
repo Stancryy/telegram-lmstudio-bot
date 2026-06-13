@@ -96,9 +96,11 @@ class AutoRenamer(MiniAgent):
         new_name = await self.quick_llm_call(
             system_prompt=RENAMER_PROMPT,
             user_prompt=preview,
-            max_tokens=3000,
-            temperature=0.3,
+            max_tokens=30,
+            temperature=0.0,
             model=ROUTER_MODEL,
+            assistant_prefill="TITULO:",
+            stop=["\n"]
         )
 
         if not new_name:

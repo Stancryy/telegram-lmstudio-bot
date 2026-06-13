@@ -38,6 +38,8 @@ class MiniAgent:
         max_tokens: int = 50,
         temperature: float = 0.3,
         model: str = "",
+        stop: list[str] = None,
+        assistant_prefill: str = None,
     ) -> Optional[str]:
         """Faz uma chamada rápida ao LLM (sem streaming).
 
@@ -45,16 +47,25 @@ class MiniAgent:
         Retorna None em caso de erro.
         """
         use_model = model or MODEL_NAME
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if assistant_prefill:
+            messages.append({"role": "assistant", "content": assistant_prefill})
+            
+        kwargs = {}
+        if stop:
+            kwargs["stop"] = stop
         try:
             response = await client.chat.completions.create(
                 model=use_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=False,
+                **kwargs
             )
             result = response.choices[0].message.content
             return result.strip() if result else None
