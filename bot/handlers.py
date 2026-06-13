@@ -10,7 +10,6 @@ import time
 import logging
 import html as html_lib
 from io import BytesIO
-import asyncio
 from typing import Optional
 
 from telegram import Update
@@ -44,7 +43,6 @@ from persistence.history import (
 from persistence import mempalace_adapter as mem
 from agents import get_agents, is_multi_agent_enabled
 from agents.base import Agent
-from agents.mini.auto_renamer import auto_renamer
 
 logger = logging.getLogger(__name__)
 
@@ -333,9 +331,6 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         await _send_final_response(update, loading_message, final_text, final_agent)
-
-        # Executar mini agentes em background
-        asyncio.create_task(_trigger_mini_agents(update, user_id, final_text))
 
     except Exception as e:
         logger.error("Erro durante /retry: %s", e)
@@ -685,12 +680,6 @@ async def _send_final_response(
                 await update.message.reply_text(part[:MAX_LENGTH])
 
 
-async def _trigger_mini_agents(update: Update, user_id: int, final_text: str) -> None:
-    """Executa mini agentes e envia os resultados adicionais."""
-    # Auto-renamer (silencioso)
-    await auto_renamer.run(user_id)
-
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler principal para mensagens de texto e imagem."""
     if not update.message:
@@ -758,9 +747,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         await _send_final_response(update, loading_message, final_text, final_agent)
-
-        # Executar mini agentes em background
-        asyncio.create_task(_trigger_mini_agents(update, user.id, final_text))
 
     except Exception as e:
         logger.error("Erro durante o handle_message: %s", e)
