@@ -1,10 +1,10 @@
 # Bot Telegram + LM Studio
 
-Este é um bot para o Telegram que utiliza o seu servidor local do **LM Studio** como inteligência artificial.
+Este é um bot para o Telegram que utiliza o seu servidor local do **LM Studio** como inteligência artificial, com **sistema multi-agente** e **memória de longo prazo**.
 
 ## Pré-requisitos
 
-1. **Python 3.8+** instalado.
+1. **Python 3.10+** instalado.
 2. **LM Studio** rodando com um modelo carregado.
 
 ## Passo a Passo para Executar
@@ -19,11 +19,7 @@ Este é um bot para o Telegram que utiliza o seu servidor local do **LM Studio**
 1. Na pasta do projeto, crie um arquivo chamado `.env` baseado no arquivo `.env.example`:
    - Copie o arquivo `.env.example` e renomeie a cópia para `.env`
 2. Abra o arquivo `.env` e cole o token do seu bot na variável `TELEGRAM_BOT_TOKEN`.
-3. (Opcional) Configure as variáveis adicionais:
-   - `MODEL_NAME` — Nome do modelo carregado no LM Studio (padrão: `local-model`)
-   - `TEMPERATURE` — Criatividade das respostas de 0.0 a 2.0 (padrão: `0.7`)
-   - `SYSTEM_PROMPT` — Instrução de comportamento para o modelo
-   - `MAX_HISTORY_LENGTH` — Limite de mensagens mantidas no histórico da sessão (padrão: `800`)
+3. (Opcional) Configure as variáveis adicionais (veja `.env.example` para todas).
 
 ### 3. Inicie o LM Studio Local Server
 1. Abra o LM Studio.
@@ -33,10 +29,8 @@ Este é um bot para o Telegram que utiliza o seu servidor local do **LM Studio**
 4. Clique em **Start Server** (Certifique-se que o port é 1234, que é o padrão).
 
 ### 4. Instale as Dependências e Execute
-Abra um terminal (ou prompt de comando) nesta pasta e execute:
-
 ```bash
-# Opcional mas recomendado: Crie um ambiente virtual
+# Crie um ambiente virtual (recomendado)
 python -m venv venv
 venv\Scripts\activate  # No Windows
 # source venv/bin/activate  # No Linux/Mac
@@ -52,10 +46,33 @@ python main.py
 Abra o Telegram, procure pelo username do seu bot e envie `/start`.
 
 ## 📸 Suporte a Imagens (Visão)
-O bot suporta o envio de imagens! Se você carregar um modelo compatível com visão no LM Studio (por exemplo, LLaVA ou similar):
-1. Envie uma foto no chat do Telegram.
-2. Adicione uma legenda se quiser fazer uma pergunta específica sobre ela.
-3. O bot processará a imagem e responderá. (As imagens são enviadas em base64 e limpas do histórico salvo localmente para evitar arquivos gigantes).
+Envie uma foto no chat do Telegram com um modelo de visão carregado no LM Studio.
+
+## Arquitetura do Projeto
+
+```
+telegram-lmstudio-bot/
+├── main.py                         # Entry point (~130 linhas)
+├── bot/
+│   ├── config.py                   # Configuração centralizada
+│   ├── handlers.py                 # Comandos do Telegram
+│   ├── streaming.py                # Streaming LLM + roteamento
+│   └── formatting.py               # Markdown → HTML
+├── agents/
+│   ├── __init__.py                 # Registry de agentes
+│   ├── base.py                     # Classe base Agent
+│   ├── router.py                   # Roteador inteligente (LLM)
+│   ├── general.py                  # 💬 Conversas gerais
+│   ├── coder.py                    # 💻 Programação
+│   ├── researcher.py               # 🔍 Pesquisa e explicações
+│   ├── creative.py                 # 🎨 Escrita criativa
+│   └── analyst.py                  # 📊 Análise e matemática
+├── persistence/
+│   ├── history.py                  # Histórico de sessões
+│   └── mempalace_adapter.py        # Memória de longo prazo
+├── requirements.txt
+└── .env
+```
 
 ## Comandos Disponíveis
 
@@ -73,7 +90,15 @@ O bot suporta o envio de imagens! Se você carregar um modelo compatível com vi
 | `/export` | Exporta o chat atual como arquivo `.txt` |
 | `/status` | Mostra diagnóstico do bot e do LM Studio |
 
-### 🏛️ Comandos de Memória de Longo Prazo (MemPalace)
+### 🤖 Comandos Multi-Agente
+
+| Comando | Descrição |
+|---|---|
+| `/agents` | Lista os agentes disponíveis com descrições |
+| `/agent <nome>` | Força um agente para a próxima mensagem |
+| `/agent auto` | Volta para roteamento automático |
+
+### 🏛️ Comandos de Memória (MemPalace)
 
 | Comando | Descrição |
 |---|---|
@@ -81,44 +106,53 @@ O bot suporta o envio de imagens! Se você carregar um modelo compatível com vi
 | `/memory` | Mostra status da memória de longo prazo |
 | `/forget` | Apaga todas as memórias armazenadas |
 
-## 🏛️ Memória de Longo Prazo (MemPalace)
+## 🤖 Sistema Multi-Agente
 
-O bot integra o **[MemPalace](https://github.com/MemPalace/mempalace)** para memória semântica de longo prazo. Isso permite que o bot **lembre de conversas anteriores** e injete contexto relevante automaticamente nas respostas.
+O bot possui um **roteador inteligente** que analisa cada mensagem e decide automaticamente qual agente especializado deve responder:
 
-### Como Funciona
+| Agente | Emoji | Temperatura | Quando é usado |
+|---|---|---|---|
+| **General** | 💬 | 0.7 | Conversas gerais, saudações |
+| **Coder** | 💻 | 0.3 | Programação, debugging, código |
+| **Researcher** | 🔍 | 0.5 | Explicações, fatos, comparações |
+| **Creative** | 🎨 | 1.0 | Escrita criativa, brainstorming |
+| **Analyst** | 📊 | 0.4 | Matemática, dados, lógica |
 
-1. **A cada mensagem**, o bot busca memórias relevantes no MemPalace e as injeta como contexto adicional para o modelo.
-2. **Após cada resposta**, a conversa é indexada automaticamente no MemPalace para uso futuro.
-3. **Entre sessões**, o bot mantém a memória — pergunte algo sobre uma conversa de dias atrás!
+### Exemplo
+```
+Você: "me ajuda a fazer uma API REST em Python"
+Bot: 💻 Coder: Claro! Vou te ajudar a criar uma API REST...
+
+Você: "escreve um poema sobre programação"
+Bot: 🎨 Creative: No silêncio do código, bytes dançam...
+```
 
 ### Configuração
-
-No arquivo `.env`:
 ```bash
-MEMPALACE_ENABLED=true         # Ativar/desativar (padrão: true)
-MEMPALACE_RESULTS=3            # Memórias a injetar por mensagem (padrão: 3)
-MEMPALACE_WING=telegram_bot    # Nome do "wing" no palace
+AGENTS_ENABLED=true              # Ativar/desativar
+ROUTER_MODEL=local-model         # Modelo do roteador
+AGENT_CODER_ENABLED=true         # Habilitar agente de código
+AGENT_RESEARCHER_ENABLED=true    # Habilitar agente de pesquisa
+AGENT_CREATIVE_ENABLED=true      # Habilitar agente criativo
+AGENT_ANALYST_ENABLED=true       # Habilitar agente analítico
 ```
 
-### Instalação
+## 🏛️ Memória de Longo Prazo (MemPalace)
 
-O MemPalace é instalado automaticamente com as dependências do projeto:
-```bash
-pip install -r requirements.txt
-```
+O bot integra o **MemPalace** para memória semântica de longo prazo, permitindo que lembre de conversas anteriores.
 
-> **Nota:** Na primeira execução, o MemPalace baixará um modelo de embeddings (~500MB). As buscas subsequentes são locais e rápidas.
-
-Para desabilitar o MemPalace, configure `MEMPALACE_ENABLED=false` no `.env`. O bot funcionará normalmente sem memória de longo prazo.
+### Como Funciona
+1. **A cada mensagem**, busca memórias relevantes e injeta como contexto.
+2. **Após cada resposta**, indexa automaticamente no MemPalace.
+3. **Entre sessões**, mantém a memória — pergunte sobre conversas de dias atrás!
 
 ## 🔒 Segurança (Whitelist)
-Por padrão o bot aceita qualquer usuário. Para limitar o acesso apenas a você:
-1. Abra o arquivo `.env` e coloque uma numeração aleatória em `ALLOWED_USER_IDS` (ex: `123`).
-2. Mande um Oi para o bot. Ele vai bloquear o acesso e responder o seu **ID real** no Telegram.
-3. Copie o seu ID real, cole no `.env` (ex: `ALLOWED_USER_IDS=7119330385`) e reinicie o bot. Agora só você pode usá-lo.
+1. Coloque um ID aleatório em `ALLOWED_USER_IDS`.
+2. Mande um Oi para o bot — ele responderá seu ID real.
+3. Cole seu ID real no `.env` e reinicie o bot.
 
-## 🛠️ Resolução de Problemas (Troubleshooting)
-- **Erro de Conexão com o LM Studio**: O bot inicia mesmo se o LM Studio estiver desligado, mas as mensagens falharão. Certifique-se de que o servidor local está rodando em `http://localhost:1234/v1` (ou a URL definida em `LM_STUDIO_URL`).
-- **Respostas cortadas/malformadas**: Mensagens muito longas são divididas automaticamente em partes seguras, respeitando limites de palavra e formatação HTML. Se houver problemas, o bot faz fallback para texto cru.
-- **Histórico corrompido**: O bot usa escrita atômica (write-tmp-then-rename) e garante salvamento no shutdown para evitar perda de dados.
-- **MemPalace não inicializa**: Verifique se `mempalace` está instalado (`pip install mempalace`) e se `MEMPALACE_ENABLED=true` no `.env`. O bot funciona normalmente sem o MemPalace.
+## 🛠️ Resolução de Problemas
+- **Erro de Conexão**: O bot inicia mesmo sem LM Studio, mas mensagens falharão.
+- **Respostas cortadas**: Divididas automaticamente em partes seguras.
+- **MemPalace não inicializa**: Instale com `pip install mempalace`.
+- **Roteador lento**: Configure `ROUTER_MODEL` para um modelo menor/mais rápido.
