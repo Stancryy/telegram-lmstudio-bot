@@ -45,8 +45,6 @@ from persistence import mempalace_adapter as mem
 from agents import get_agents, is_multi_agent_enabled
 from agents.base import Agent
 from agents.mini.auto_renamer import auto_renamer
-from agents.mini.tldr import tldr_agent
-from agents.mini.follow_up import follow_up_agent
 
 logger = logging.getLogger(__name__)
 
@@ -691,29 +689,6 @@ async def _trigger_mini_agents(update: Update, user_id: int, final_text: str) ->
     """Executa mini agentes e envia os resultados adicionais."""
     # Auto-renamer (silencioso)
     await auto_renamer.run(user_id)
-    
-    # TL;DR e Follow-up correm em paralelo
-    tldr_task = asyncio.create_task(tldr_agent.run(final_text))
-    followup_task = asyncio.create_task(follow_up_agent.run(final_text))
-    
-    tldr_res, followup_res = await asyncio.gather(tldr_task, followup_task)
-    
-    extras = []
-    if tldr_res:
-        extras.append(f"<b>{tldr_agent.emoji} TL;DR:</b> {html_lib.escape(tldr_res)}")
-    if followup_res:
-        # Avoid escaping the emojis that the follow-up agent already added
-        # but escape the rest of the text. We'll just rely on the agent's formatting 
-        # or escape everything except the starting emoji.
-        # Actually, standard html_lib.escape is fine for emojis.
-        extras.append(html_lib.escape(followup_res))
-        
-    if extras:
-        extra_text = "\n\n".join(extras)
-        try:
-            await update.message.reply_text(extra_text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            logger.warning("Falha ao enviar mensagens de mini agentes: %s", e)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
