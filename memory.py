@@ -201,8 +201,7 @@ def _mine_text_sync(
         col = _open_collection_or_explain(palace_path, opener=get_collection)
         if col is None:
             # Tentar criar a collection
-            from mempalace.palace import get_or_create_collection
-            col = get_or_create_collection(palace_path)
+            col = get_collection(palace_path, create=True)
             if col is None:
                 logger.warning("Não foi possível criar a collection do MemPalace.")
                 return False
