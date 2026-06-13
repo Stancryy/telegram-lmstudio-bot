@@ -10,6 +10,7 @@ import time
 import logging
 import html as html_lib
 from io import BytesIO
+import asyncio
 from typing import Optional
 
 from telegram import Update
@@ -43,6 +44,9 @@ from persistence.history import (
 from persistence import mempalace_adapter as mem
 from agents import get_agents, is_multi_agent_enabled
 from agents.base import Agent
+from agents.mini.auto_renamer import auto_renamer
+from agents.mini.tldr import tldr_agent
+from agents.mini.follow_up import follow_up_agent
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +335,9 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         await _send_final_response(update, loading_message, final_text, final_agent)
+
+        # Executar mini agentes em background
+        asyncio.create_task(_trigger_mini_agents(update, user_id, final_text))
 
     except Exception as e:
         logger.error("Erro durante /retry: %s", e)
@@ -680,6 +687,35 @@ async def _send_final_response(
                 await update.message.reply_text(part[:MAX_LENGTH])
 
 
+async def _trigger_mini_agents(update: Update, user_id: int, final_text: str) -> None:
+    """Executa mini agentes e envia os resultados adicionais."""
+    # Auto-renamer (silencioso)
+    await auto_renamer.run(user_id)
+    
+    # TL;DR e Follow-up correm em paralelo
+    tldr_task = asyncio.create_task(tldr_agent.run(final_text))
+    followup_task = asyncio.create_task(follow_up_agent.run(final_text))
+    
+    tldr_res, followup_res = await asyncio.gather(tldr_task, followup_task)
+    
+    extras = []
+    if tldr_res:
+        extras.append(f"<b>{tldr_agent.emoji} TL;DR:</b> {html_lib.escape(tldr_res)}")
+    if followup_res:
+        # Avoid escaping the emojis that the follow-up agent already added
+        # but escape the rest of the text. We'll just rely on the agent's formatting 
+        # or escape everything except the starting emoji.
+        # Actually, standard html_lib.escape is fine for emojis.
+        extras.append(html_lib.escape(followup_res))
+        
+    if extras:
+        extra_text = "\n\n".join(extras)
+        try:
+            await update.message.reply_text(extra_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.warning("Falha ao enviar mensagens de mini agentes: %s", e)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler principal para mensagens de texto e imagem."""
     if not update.message:
@@ -747,6 +783,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         await _send_final_response(update, loading_message, final_text, final_agent)
+
+        # Executar mini agentes em background
+        asyncio.create_task(_trigger_mini_agents(update, user.id, final_text))
 
     except Exception as e:
         logger.error("Erro durante o handle_message: %s", e)
