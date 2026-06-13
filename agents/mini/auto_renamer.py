@@ -12,14 +12,18 @@ from typing import Optional
 
 from agents.mini.base import MiniAgent
 from persistence.history import user_histories, save_history
+from bot.config import ROUTER_MODEL
 
 logger = logging.getLogger(__name__)
 
 RENAMER_PROMPT = (
     "Gere um título MUITO curto (máximo 4 palavras) para esta conversa. "
     "O título deve capturar o tema principal. "
-    "Responda APENAS com o título, sem aspas, sem pontuação final, sem explicação. "
-    "Exemplos: API REST Python, Poema sobre Chuva, Bug no Login, Dicas de Viagem"
+    "REGRA CRÍTICA: VOCÊ ESTÁ PROIBIDO DE PENSAR OU RACIOCINAR. "
+    "Não use tags <think>. Não explique nada. "
+    "Sua primeira e única palavra gerada DEVE SER 'TITULO:'. "
+    "O formato EXATO da sua resposta deve ser:\n"
+    "TITULO: [seu titulo aqui]\n\n"
 )
 
 
@@ -92,18 +96,32 @@ class AutoRenamer(MiniAgent):
         new_name = await self.quick_llm_call(
             system_prompt=RENAMER_PROMPT,
             user_prompt=preview,
-            max_tokens=20,
+            max_tokens=3000,
             temperature=0.3,
+            model=ROUTER_MODEL,
         )
 
         if not new_name:
             return None
 
-        # Limpar o nome (remover aspas, pontuação, etc.)
-        new_name = new_name.strip('"\'.,!?;:')
+        # Tentar extrair do formato 'TITULO: ...'
+        match = re.search(r"TITULO:\s*(.*?)(?:\n|$)", new_name, re.IGNORECASE)
+        if match:
+            new_name = match.group(1).strip()
+        else:
+            # Fallback: pega a última linha não vazia, ou a primeira linha, tentando adivinhar
+            lines = [line.strip() for line in new_name.split("\n") if line.strip() and not line.startswith("#")]
+            if lines:
+                # O modelo pode colocar o titulo no fim (como vimos) ou no começo
+                new_name = lines[-1] if len(lines[-1]) < 40 else lines[0]
+            
+        # Limpar o nome (remover aspas, pontuação, asteriscos, etc.)
+        new_name = new_name.replace("*", "").replace("`", "")
+        new_name = new_name.strip('"\'.,!?;: ')
+        
         # Limitar a 30 chars
         if len(new_name) > 30:
-            new_name = new_name[:30]
+            new_name = new_name[:30].strip()
 
         if not new_name:
             return None
