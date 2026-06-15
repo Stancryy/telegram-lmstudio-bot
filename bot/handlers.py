@@ -146,16 +146,54 @@ async def list_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for sid, session_data in sessions.items():
         msgs = session_data["messages"]
         chat_name = session_data.get("name", f"Chat {sid}")
-        preview = "Vazio"
+
+        # Contar mensagens reais (excluindo system)
+        real_msg_count = sum(1 for m in msgs if m["role"] != "system")
+
+        # Buscar preview significativo:
+        # 1. Primeira mensagem de texto do usuário (ignorando placeholders de imagem)
+        # 2. Primeira resposta do assistente
+        # 3. Fallback: contagem de mensagens
+        preview = ""
         for m in msgs:
             if m["role"] == "user":
-                content = m["content"] if isinstance(m["content"], str) else "[Imagem]"
-                preview = content[:CHAT_PREVIEW_LENGTH] + "..." if len(content) > CHAT_PREVIEW_LENGTH else content
-                break
+                content = m["content"] if isinstance(m["content"], str) else ""
+                # Pular placeholders de imagem que não ajudam a identificar o chat
+                if content.startswith("[Imagem") or content.startswith("[Conteúdo"):
+                    continue
+                if content.strip():
+                    preview = content.strip()
+                    break
 
+        # Fallback: tentar primeira resposta do assistente
+        if not preview:
+            for m in msgs:
+                if m["role"] == "assistant":
+                    content = m["content"] if isinstance(m["content"], str) else ""
+                    if content.strip():
+                        preview = f"🤖 {content.strip()}"
+                        break
+
+        # Último fallback
+        if not preview:
+            if any(m["role"] == "user" and (
+                not isinstance(m["content"], str) or m["content"].startswith("[Imagem")
+            ) for m in msgs):
+                preview = "🖼️ Conversa com imagens"
+            elif real_msg_count == 0:
+                preview = "Vazio"
+            else:
+                preview = f"💬 {real_msg_count} mensagem(ns)"
+
+        # Truncar preview
+        if len(preview) > CHAT_PREVIEW_LENGTH:
+            preview = preview[:CHAT_PREVIEW_LENGTH] + "..."
+
+        # Indicador de chat atual e contagem de mensagens
         prefix = "👉" if sid == curr else "💬"
+        count_label = f" [{real_msg_count} msgs]" if real_msg_count > 0 else ""
         msg_lines.append(
-            f"{prefix} <b>Sessão {sid}</b> — <i>{html_lib.escape(chat_name)}</i>: "
+            f"{prefix} <b>Sessão {sid}</b> — <i>{html_lib.escape(chat_name)}</i>{count_label}: "
             f"{html_lib.escape(preview)}"
         )
 
