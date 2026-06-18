@@ -54,10 +54,17 @@ def clear_forced_agent(user_id: int) -> None:
 def sanitize_message_for_history(user_message) -> str:
     """Remove base64 de imagens antes de persistir no histórico."""
     if isinstance(user_message, list):
-        for item in user_message:
-            if item.get("type") == "text":
-                return f"[Imagem analisada com legenda: '{item.get('text', '')}']"
-        return "[Imagem recebida]"
+        # Contar quantas imagens existem
+        image_count = sum(1 for item in user_message if item.get("type") == "image_url")
+        # Extrair o texto/caption
+        text_parts = [item.get("text", "") for item in user_message if item.get("type") == "text"]
+        caption = text_parts[0] if text_parts else ""
+
+        if image_count > 1:
+            return f"[{image_count} imagens analisadas com legenda: '{caption}']"
+        elif image_count == 1:
+            return f"[Imagem analisada com legenda: '{caption}']"
+        return "[Conteúdo multimídia recebido]"
     return user_message
 
 
