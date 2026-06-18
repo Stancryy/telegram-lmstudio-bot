@@ -753,14 +753,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         byte_array = await photo_file.download_as_bytearray()
         base64_image = base64.b64encode(byte_array).decode('utf-8')
 
+        logger.info(
+            "📸 Media group %s: imagem recebida (%d bytes) para user %s",
+            media_group_id, len(byte_array), user.id,
+        )
+
         if media_group_id not in _media_group_buffers:
             # Primeira imagem do grupo — criar o buffer
+            # Guardar referências diretas ao bot e chat_id para não depender
+            # do update/context após o handler retornar
             _media_group_buffers[media_group_id] = {
                 "images": [],
                 "caption": None,
                 "update": update,
                 "context": context,
                 "user": user,
+                "chat_id": update.effective_chat.id,
+                "bot": context.bot,
                 "task": None,
             }
 
@@ -805,12 +814,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _process_media_group(media_group_id: str) -> None:
     """Aguarda todas as imagens do grupo chegarem e processa de uma vez."""
-    # Esperar para coletar todas as imagens do grupo
-    await asyncio.sleep(MEDIA_GROUP_WAIT_SECONDS)
+    try:
+        # Esperar para coletar todas as imagens do grupo
+        await asyncio.sleep(MEDIA_GROUP_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        # Task foi cancelada porque uma nova imagem chegou e resetou o timer
+        # Isso é esperado e normal — a nova task vai processar tudo
+        logger.debug("📸 Media group %s: timer cancelado (nova imagem chegou)", media_group_id)
+        return
 
     # Recuperar e limpar o buffer
     buffer = _media_group_buffers.pop(media_group_id, None)
     if not buffer or not buffer["images"]:
+        logger.warning("📸 Media group %s: buffer vazio ou não encontrado", media_group_id)
         return
 
     images = buffer["images"]
@@ -818,23 +834,36 @@ async def _process_media_group(media_group_id: str) -> None:
     update = buffer["update"]
     context = buffer["context"]
     user = buffer["user"]
+    chat_id = buffer["chat_id"]
+    bot = buffer["bot"]
 
     logger.info(
         "📸 Media group %s: processando %d imagem(ns) juntas para user %s",
         media_group_id, len(images), user.id,
     )
 
-    # Montar o conteúdo com todas as imagens num único bloco
-    message_content = [
-        {"type": "text", "text": f"{caption} ({len(images)} imagens enviadas)"},
-    ]
-    for base64_image in images:
-        message_content.append(
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        )
+    try:
+        # Montar o conteúdo com todas as imagens num único bloco
+        message_content = [
+            {"type": "text", "text": f"{caption} ({len(images)} imagens enviadas)"},
+        ]
+        for base64_image in images:
+            message_content.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            )
 
-    # Processar como uma única mensagem
-    await _process_single_message(update, context, user, message_content)
+        # Processar como uma única mensagem
+        await _process_single_message(update, context, user, message_content)
+
+    except Exception as e:
+        logger.error("📸 Erro ao processar media group %s: %s", media_group_id, e, exc_info=True)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Erro ao processar as {len(images)} imagens: {e}",
+            )
+        except Exception as send_err:
+            logger.error("Falha ao enviar erro do media group: %s", send_err)
 
 
 async def _process_single_message(
