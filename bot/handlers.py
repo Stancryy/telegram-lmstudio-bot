@@ -5,6 +5,7 @@ Contém todos os handlers de comando (/start, /help, etc.)
 e o handler principal de mensagens de texto/imagem.
 """
 
+import asyncio
 import base64
 import time
 import logging
@@ -45,6 +46,15 @@ from agents import get_agents, is_multi_agent_enabled
 from agents.base import Agent
 
 logger = logging.getLogger(__name__)
+
+# ==== MEDIA GROUP BUFFERING ====
+# Quando o usuário envia múltiplas imagens de uma vez, o Telegram envia cada
+# imagem como um Update separado, mas todas compartilham o mesmo media_group_id.
+# Este buffer acumula as imagens por ~1.5s antes de processar tudo de uma vez.
+
+# Estrutura: { media_group_id: { "images": [...], "caption": str, "update": Update, "context": ctx, "task": Task } }
+_media_group_buffers: dict[str, dict] = {}
+MEDIA_GROUP_WAIT_SECONDS = 1.5  # tempo para aguardar todas as imagens do grupo
 
 
 # ==== HELP TEXT ====
@@ -719,7 +729,11 @@ async def _send_final_response(
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler principal para mensagens de texto e imagem."""
+    """Handler principal para mensagens de texto e imagem.
+    
+    Quando múltiplas imagens são enviadas como um grupo (media group),
+    elas são acumuladas e processadas juntas numa única requisição à IA.
+    """
     if not update.message:
         return
 
@@ -730,7 +744,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     is_photo = bool(update.message.photo)
+    media_group_id = update.message.media_group_id
 
+    # === CASO 1: Foto que faz parte de um media group (múltiplas imagens) ===
+    if is_photo and media_group_id:
+        # Baixar a imagem
+        photo_file = await update.message.photo[-1].get_file()
+        byte_array = await photo_file.download_as_bytearray()
+        base64_image = base64.b64encode(byte_array).decode('utf-8')
+
+        if media_group_id not in _media_group_buffers:
+            # Primeira imagem do grupo — criar o buffer
+            _media_group_buffers[media_group_id] = {
+                "images": [],
+                "caption": None,
+                "update": update,
+                "context": context,
+                "user": user,
+                "task": None,
+            }
+
+        # Adicionar a imagem ao buffer
+        _media_group_buffers[media_group_id]["images"].append(base64_image)
+
+        # Capturar a legenda (caption) — geralmente só a primeira imagem tem
+        if update.message.caption and not _media_group_buffers[media_group_id]["caption"]:
+            _media_group_buffers[media_group_id]["caption"] = update.message.caption
+
+        # Cancelar o timer anterior (se houver) e agendar um novo
+        existing_task = _media_group_buffers[media_group_id].get("task")
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        # Agendar processamento após o delay (espera todas as imagens chegarem)
+        _media_group_buffers[media_group_id]["task"] = asyncio.create_task(
+            _process_media_group(media_group_id)
+        )
+        return
+
+    # === CASO 2: Foto única (sem media group) ===
     if is_photo:
         photo_file = await update.message.photo[-1].get_file()
         byte_array = await photo_file.download_as_bytearray()
@@ -742,10 +794,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
         ]
     else:
+        # === CASO 3: Mensagem de texto ===
         message_content = update.message.text
         if not message_content:
             return
 
+    # Processar normalmente (foto única ou texto)
+    await _process_single_message(update, context, user, message_content)
+
+
+async def _process_media_group(media_group_id: str) -> None:
+    """Aguarda todas as imagens do grupo chegarem e processa de uma vez."""
+    # Esperar para coletar todas as imagens do grupo
+    await asyncio.sleep(MEDIA_GROUP_WAIT_SECONDS)
+
+    # Recuperar e limpar o buffer
+    buffer = _media_group_buffers.pop(media_group_id, None)
+    if not buffer or not buffer["images"]:
+        return
+
+    images = buffer["images"]
+    caption = buffer["caption"] or "Descreva o que há nestas imagens detalhadamente."
+    update = buffer["update"]
+    context = buffer["context"]
+    user = buffer["user"]
+
+    logger.info(
+        "📸 Media group %s: processando %d imagem(ns) juntas para user %s",
+        media_group_id, len(images), user.id,
+    )
+
+    # Montar o conteúdo com todas as imagens num único bloco
+    message_content = [
+        {"type": "text", "text": f"{caption} ({len(images)} imagens enviadas)"},
+    ]
+    for base64_image in images:
+        message_content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        )
+
+    # Processar como uma única mensagem
+    await _process_single_message(update, context, user, message_content)
+
+
+async def _process_single_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    message_content,
+) -> None:
+    """Processa uma única mensagem (texto, foto única, ou grupo de fotos) e envia a resposta."""
     # Typing indicator
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
@@ -794,3 +892,4 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.warning("Timeout ao enviar mensagem de erro para o usuário %s", user.id)
         except Exception as send_err:
             logger.error("Falha ao enviar mensagem de erro: %s", send_err)
+
