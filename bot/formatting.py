@@ -23,6 +23,9 @@ def format_to_html(text: str) -> str:
     # Inline code: `code` → <code>code</code>
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
 
+    # Headers: # Título → <b>Título</b>
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+
     # Bold + Italic: ***text*** → <b><i>text</i></b>
     text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
 
@@ -34,6 +37,18 @@ def format_to_html(text: str) -> str:
 
     # Strikethrough: ~~text~~ → <s>text</s>
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
+
+    # Links: [texto](url) → <a href="url">texto</a>
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+
+    # Unordered lists: - item ou * item → • item
+    text = re.sub(r'^[\-\*]\s+', '• ', text, flags=re.MULTILINE)
+
+    # Ordered lists: 1. item → 1. item (mantém numeração, só limpa espaço)
+    text = re.sub(r'^(\d+)\.\s+', r'\1. ', text, flags=re.MULTILINE)
+
+    # Blockquotes: > texto → ❝ texto
+    text = re.sub(r'^&gt;\s?(.+)$', r'❝ <i>\1</i>', text, flags=re.MULTILINE)
 
     return text
 
