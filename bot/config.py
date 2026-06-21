@@ -53,6 +53,9 @@ STREAM_EDIT_INTERVAL: float = 1.0  # segundos entre edições durante streaming
 CHAT_PREVIEW_LENGTH: int = 35
 SAVE_DEBOUNCE_SECONDS: float = 2.0
 
+# ==== RATE LIMITING ====
+MIN_MSG_INTERVAL: float = float(os.getenv("MIN_MSG_INTERVAL", "2.0"))  # segundos entre mensagens
+
 # ==== MEMPALACE ====
 MEMPALACE_ENABLED: bool = os.getenv("MEMPALACE_ENABLED", "true").lower() in (
     "true", "1", "yes",
@@ -85,8 +88,29 @@ client = AsyncOpenAI(
 )
 
 
+# ==== FUNÇÕES AUXILIARES ====
+
 def is_user_allowed(user_id: int) -> bool:
     """Verifica se um usuário tem permissão para usar o bot."""
     if not ALLOWED_USER_IDS:
         return True
     return user_id in ALLOWED_USER_IDS
+
+
+import time as _time
+
+_user_last_msg: dict[int, float] = {}
+
+
+def is_rate_limited(user_id: int) -> bool:
+    """Verifica se o usuário está enviando mensagens rápido demais.
+
+    Retorna True se o intervalo desde a última mensagem for menor
+    que MIN_MSG_INTERVAL. Atualiza o timestamp se não estiver limitado.
+    """
+    now = _time.time()
+    last = _user_last_msg.get(user_id, 0.0)
+    if now - last < MIN_MSG_INTERVAL:
+        return True
+    _user_last_msg[user_id] = now
+    return False
