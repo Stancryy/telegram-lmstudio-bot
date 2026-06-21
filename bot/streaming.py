@@ -32,6 +32,14 @@ from agents.base import Agent
 
 logger = logging.getLogger(__name__)
 
+
+async def _safe_background_task(coro) -> None:
+    """Wrapper para tasks em background que loga exceções em vez de engoli-las."""
+    try:
+        await coro
+    except Exception as e:
+        logger.error("Background task falhou: %s", e, exc_info=True)
+
 # Estado: agente forçado por usuário (via /agent <nome>)
 _forced_agents: dict[int, Optional[str]] = {}
 
@@ -154,8 +162,14 @@ async def get_llm_stream(
                     yield (bot_response, None)
 
     except Exception as e:
-        logger.error("Erro ao contatar LM Studio: %s", e)
-        yield (f"Desculpe, ocorreu um erro ao processar sua mensagem: {e}", selected_agent)
+        error_msg = str(e).lower()
+        if any(kw in error_msg for kw in ("connect", "refused", "unreachable", "timeout", "closed")):
+            logger.error("LM Studio inacessível: %s", e)
+            yield ("⚠️ O LM Studio parece estar offline ou inacessível. "
+                   "Verifique se ele está rodando e tente novamente.", selected_agent)
+        else:
+            logger.error("Erro ao contatar LM Studio: %s", e)
+            yield (f"Desculpe, ocorreu um erro ao processar sua mensagem: {e}", selected_agent)
     finally:
         # Persistir mensagem e resposta
         if isinstance(user_message, list):
@@ -173,10 +187,12 @@ async def get_llm_stream(
         if MEMPALACE_ENABLED and mem.is_available() and bot_response:
             curr = user_histories[user_id]["current"]
             asyncio.create_task(
-                mem.mine_conversation(
-                    user_id=user_id,
-                    session_id=curr,
-                    messages=session_history,
-                    wing=MEMPALACE_WING,
+                _safe_background_task(
+                    mem.mine_conversation(
+                        user_id=user_id,
+                        session_id=curr,
+                        messages=session_history,
+                        wing=MEMPALACE_WING,
+                    )
                 )
             )
