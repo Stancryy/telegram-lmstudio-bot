@@ -18,6 +18,8 @@ from telegram.constants import ParseMode, ChatAction
 from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
+from collections import defaultdict
+
 from bot.config import (
     MAX_TELEGRAM_MSG_LENGTH,
     STREAM_EDIT_INTERVAL,
@@ -30,6 +32,7 @@ from bot.config import (
     TEMPERATURE,
     MAX_HISTORY_LENGTH,
     is_user_allowed,
+    is_rate_limited,
     client,
 )
 from bot.formatting import format_to_html, split_text_safely
@@ -46,6 +49,10 @@ from agents import get_agents, is_multi_agent_enabled
 from agents.base import Agent
 
 logger = logging.getLogger(__name__)
+
+# Lock por usuário para serializar o processamento de mensagens e
+# evitar race conditions no histórico compartilhado.
+_user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # ==== MEDIA GROUP BUFFERING ====
 # Quando o usuário envia múltiplas imagens de uma vez, o Telegram envia cada
@@ -331,61 +338,25 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     init_user_session(user_id)
 
-    session_history = get_session_messages(user_id)
+    async with _user_locks[user_id]:
+        session_history = get_session_messages(user_id)
 
-    last_user_msg = None
-    if len(session_history) >= 2 and session_history[-1]["role"] == "assistant":
-        session_history.pop()
-    if len(session_history) >= 2 and session_history[-1]["role"] == "user":
-        last_user_msg = session_history.pop()
+        last_user_msg = None
+        if len(session_history) >= 2 and session_history[-1]["role"] == "assistant":
+            session_history.pop()
+        if len(session_history) >= 2 and session_history[-1]["role"] == "user":
+            last_user_msg = session_history.pop()
 
-    if not last_user_msg:
-        await update.message.reply_text("❌ Nenhuma mensagem anterior encontrada para reenviar.")
-        return
-
-    await save_history()
-
-    loading_message = await update.message.reply_text("🔄 Regenerando resposta...")
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
-    last_edit_time = time.time()
-    final_text = ""
-    final_agent: Optional[Agent] = None
-
-    try:
-        async for partial_text, agent in get_llm_stream(user_id, last_user_msg["content"]):
-            final_text = partial_text
-            final_agent = agent
-            current_time = time.time()
-
-            if current_time - last_edit_time > STREAM_EDIT_INTERVAL:
-                truncated = partial_text[:MAX_TELEGRAM_MSG_LENGTH - 10]
-                formatted_partial = format_to_html(truncated)
-                agent_label = f"{agent.label}: " if agent else ""
-                try:
-                    await loading_message.edit_text(
-                        f"{agent_label}{formatted_partial} ✍️",
-                        parse_mode=ParseMode.HTML,
-                    )
-                except BadRequest:
-                    try:
-                        await loading_message.edit_text(truncated + " ✍️")
-                    except BadRequest:
-                        pass
-                last_edit_time = current_time
-
-        if not final_text:
-            await loading_message.edit_text("A IA não retornou nenhuma resposta.")
+        if not last_user_msg:
+            await update.message.reply_text("❌ Nenhuma mensagem anterior encontrada para reenviar.")
             return
 
-        await _send_final_response(update, loading_message, final_text, final_agent)
+        await save_history()
 
-    except Exception as e:
-        logger.error("Erro durante /retry: %s", e)
-        try:
-            await update.message.reply_text("Desculpe, ocorreu um erro ao regenerar a resposta.")
-        except TimedOut:
-            logger.warning("Timeout ao enviar mensagem de erro no /retry")
+        loading_message = await update.message.reply_text("🔄 Regenerando resposta...")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+        await _stream_and_display(update, context, loading_message, user_id, last_user_msg["content"])
 
 
 # ==== EXPORT ====
@@ -689,6 +660,60 @@ async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ==== HANDLER PRINCIPAL DE MENSAGENS ====
 
+async def _stream_and_display(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    loading_message,
+    user_id: int,
+    message_content,
+) -> None:
+    """Lógica compartilhada de streaming + edição parcial + resposta final.
+
+    Usada tanto por handle_message quanto por /retry para evitar duplicação.
+    """
+    last_edit_time = time.time()
+    final_text = ""
+    final_agent: Optional[Agent] = None
+
+    try:
+        async for partial_text, agent in get_llm_stream(user_id, message_content):
+            final_text = partial_text
+            final_agent = agent
+            current_time = time.time()
+
+            if current_time - last_edit_time > STREAM_EDIT_INTERVAL:
+                await context.bot.send_chat_action(
+                    chat_id=update.effective_chat.id, action=ChatAction.TYPING,
+                )
+                truncated = partial_text[:MAX_TELEGRAM_MSG_LENGTH - 10]
+                formatted_partial = format_to_html(truncated)
+                agent_label = f"{agent.emoji} " if agent else ""
+                try:
+                    await loading_message.edit_text(
+                        f"{agent_label}{formatted_partial} ✍️",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except (BadRequest, TimedOut):
+                    try:
+                        await loading_message.edit_text(truncated + " ✍️")
+                    except (BadRequest, TimedOut):
+                        pass
+                last_edit_time = current_time
+
+        if not final_text:
+            await loading_message.edit_text("A IA não retornou nenhuma resposta.")
+            return
+
+        await _send_final_response(update, loading_message, final_text, final_agent)
+
+    except Exception as e:
+        logger.error("Erro durante streaming: %s", e)
+        try:
+            await update.message.reply_text("Desculpe, ocorreu um erro inesperado.")
+        except (TimedOut, Exception) as send_err:
+            logger.warning("Falha ao enviar mensagem de erro: %s", send_err)
+
+
 async def _send_final_response(
     update: Update,
     loading_message,
@@ -730,7 +755,7 @@ async def _send_final_response(
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler principal para mensagens de texto e imagem.
-    
+
     Quando múltiplas imagens são enviadas como um grupo (media group),
     elas são acumuladas e processadas juntas numa única requisição à IA.
     """
@@ -741,6 +766,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_user_allowed(user.id):
         logger.warning("Tentativa de acesso negado: %s", user.id)
         await update.message.reply_text(f"Acesso negado. Seu ID é {user.id}.")
+        return
+
+    # Rate limiting — evitar spam
+    if is_rate_limited(user.id):
+        logger.debug("Rate limited: user %s", user.id)
         return
 
     is_photo = bool(update.message.photo)
@@ -873,52 +903,11 @@ async def _process_single_message(
     message_content,
 ) -> None:
     """Processa uma única mensagem (texto, foto única, ou grupo de fotos) e envia a resposta."""
-    # Typing indicator
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    async with _user_locks[user.id]:
+        # Typing indicator
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
-    loading_message = await update.message.reply_text("⏳ Pensando...")
+        loading_message = await update.message.reply_text("⏳ Pensando...")
 
-    last_edit_time = time.time()
-    final_text = ""
-    final_agent: Optional[Agent] = None
-
-    try:
-        async for partial_text, agent in get_llm_stream(user.id, message_content):
-            final_text = partial_text
-            final_agent = agent
-            current_time = time.time()
-
-            if current_time - last_edit_time > STREAM_EDIT_INTERVAL:
-                await context.bot.send_chat_action(
-                    chat_id=update.effective_chat.id, action=ChatAction.TYPING,
-                )
-                truncated = partial_text[:MAX_TELEGRAM_MSG_LENGTH - 10]
-                formatted_partial = format_to_html(truncated)
-                agent_label = f"{agent.emoji} " if agent else ""
-                try:
-                    await loading_message.edit_text(
-                        f"{agent_label}{formatted_partial} ✍️",
-                        parse_mode=ParseMode.HTML,
-                    )
-                except BadRequest:
-                    try:
-                        await loading_message.edit_text(truncated + " ✍️")
-                    except BadRequest:
-                        pass
-                last_edit_time = current_time
-
-        if not final_text:
-            await loading_message.edit_text("A IA não retornou nenhuma resposta.")
-            return
-
-        await _send_final_response(update, loading_message, final_text, final_agent)
-
-    except Exception as e:
-        logger.error("Erro durante o handle_message: %s", e)
-        try:
-            await update.message.reply_text("Desculpe, ocorreu um erro inesperado.")
-        except TimedOut:
-            logger.warning("Timeout ao enviar mensagem de erro para o usuário %s", user.id)
-        except Exception as send_err:
-            logger.error("Falha ao enviar mensagem de erro: %s", send_err)
+        await _stream_and_display(update, context, loading_message, user.id, message_content)
 
